@@ -1,0 +1,60 @@
+services:
+  mongo:
+    image: mongo:8.0
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand({ping:1}).ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [database]
+
+  mongo-init:
+    image: mongo:8.0
+    restart: "no"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    entrypoint: ["mongosh", "--host", "mongo:27017", "--quiet", "--eval"]
+    command:
+      - |
+        try { rs.status(); } catch (error) {
+          if (error.code === 94) rs.initiate({_id:'rs0', members:[{_id:0,host:'mongo:27017'}]});
+          else throw error;
+        }
+        let attempts = 0;
+        while (!db.hello().isWritablePrimary && attempts++ < 60) sleep(1000);
+        if (!db.hello().isWritablePrimary) quit(1);
+    networks: [database]
+
+  web:
+    build: .
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    environment:
+      MONGODB_URI: mongodb://mongo:27017/equiptrack?replicaSet=rs0
+      MONGODB_DB: equiptrack
+      TZ: Asia/Bangkok
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+    networks: [database, public]
+
+volumes:
+  mongo_data:
+
+networks:
+  database:
+    internal: true
+  public:
